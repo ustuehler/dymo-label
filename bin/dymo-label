@@ -1,0 +1,92 @@
+#!/usr/bin/env ruby
+
+require 'dymo/label'
+require 'highline/import'
+require 'optparse'
+require 'socket'
+
+options = {
+  :connect => nil,
+  :device  => nil
+}
+
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: #{opts.program_name} [options] <design> [<args>...]"
+
+  opts.separator ""
+  opts.separator "Options:"
+
+  opts.on('-c', '--connect=<host>:<port>',
+  'connect to remote printer via TCP') do |arg|
+    host, port = arg.split(':')
+    options[:connect] = [host, port.to_i]
+  end
+
+  opts.on('-d', '--device=<path>',
+  'connect to printer via serial device') do |arg|
+    options[:device] = arg
+  end
+
+  opts.separator ""
+  opts.separator "Label designs:"
+
+  Dymo::Label::Design.each do |design|
+    opts.separator "#{opts.summary_indent}#{"%-#{opts.summary_width}s" % design.name} #{design.description}"
+  end
+end
+
+optparse.parse!
+
+if ARGV.size == 0
+  optparse.abort 'missing label design name'
+end
+
+if options[:connect] and options[:device]
+  optparse.abort 'options -c and -d are incompatible'
+end
+
+if not (options[:connect] or options[:device])
+  optparse.abort 'either -c or -d must be given'
+end
+
+design_name = ARGV.shift
+design_args = ARGV
+
+unless design = Dymo::Label::Design.find(design_name)
+  optparse.abort "unknown label design: #{design_name}"
+end
+
+img = design.draw(*design_args)
+design.preview(*design_args).display
+exit unless agree("Print this #{img.rows}x#{img.columns} px label? ")
+
+img.rotate! 90
+data = ''
+img.export_pixels(0, 0, img.columns, img.rows, 'I').each_slice(8) do |pixels|
+  data << [pixels.map { |i| i == 0 ? '1' : '0' }.join].pack('B*')
+end
+
+if options[:device]
+  s = File.open(options[:device], 'w')
+else
+  host, port = options[:connect]
+  s = TCPSocket.new(host, port)
+end
+
+GS  = "\x1d"
+ESC = "\x1b"
+SYN = "\x16"
+
+SET_FEED_LENGTH    = "#{GS}L"
+SET_DOT_TAB        = "#{ESC}B"
+SET_BYTES_PER_LINE = "#{ESC}D"
+FORM_FEED          = "#{ESC}E"
+
+s.write "#{SET_FEED_LENGTH}#{[img.rows].pack 'n'}"
+s.write "#{SET_DOT_TAB}#{[0].pack 'C'}"
+s.write "#{SET_BYTES_PER_LINE}#{[img.columns / 8].pack 'C'}"
+data.chars.each_slice(12) do |bytes|
+  s.write "#{SYN}#{bytes.join}"
+end
+s.write FORM_FEED
+s.close
